@@ -1,0 +1,10 @@
+config 目录下面可能会有config_0, config_1, config_2, config_3, config_4, config_5, config_6, config_7, config_8, config_9
+
+等等的目录，请不要修改config 目录下面的credentials.conf文件，vnc_password文件文件
+因为它们会复制到config_x目录下面  x是对应的数字的意思
+如果你修改了，以后config_x目录下面的文件都是一样的内容
+
+你应该这样做，先运行容器，然后进config_x 如： config_0 目录下面去填写账号和密码 
+config_x 是每个账号私有空间
+
+.deb文件不要删除，如果以后需要更新把deb包给换掉，然后重新运行容器，config_x目录不会被删除，不用担心
