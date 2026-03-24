@@ -36,6 +36,7 @@ logger = logging.getLogger("VDI_FSM")
 
 import websocket
 
+
 # --- CONFIG LOADING ---
 def load_config(path='/config/credentials.conf'):
     config = {}
@@ -49,15 +50,30 @@ def load_config(path='/config/credentials.conf'):
                 config[key.strip()] = val.strip().strip('"').strip("'")
     return config
 
+
+def _parse_bool(val, default=False):
+    """解析配置里的布尔值，兼容 true/false/1/0/yes/no 等形式"""
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    s = str(val).strip().lower()
+    if s in {"1", "true", "yes", "y", "on"}:
+        return True
+    if s in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 # --- CDP HELPER ---
 class CDPSession:
     def __init__(self, ws_url):
         self.ws = websocket.create_connection(ws_url, timeout=5)
         self.msg_id = 0
-        
+
     def send(self, method, params=None):
         self.msg_id += 1
-        message = { "id": self.msg_id, "method": method, "params": params or {} }
+        message = {"id": self.msg_id, "method": method, "params": params or {}}
         try:
             self.ws.send(json.dumps(message))
             while True:
@@ -65,7 +81,7 @@ class CDPSession:
                 data = json.loads(resp)
                 if data.get("id") == self.msg_id:
                     if "error" in data:
-                        return None 
+                        return None
                     return data.get("result")
         except Exception as e:
             return None
@@ -80,7 +96,7 @@ class CDPSession:
         return res.get("result", {}).get("value")
 
     def reload(self):
-        self.send("Page.reload")     
+        self.send("Page.reload")
 
     def is_alive(self):
         """Stealthy heartbeat check using a browser-level command (no JS injection)"""
@@ -93,20 +109,24 @@ class CDPSession:
             return False
 
     def close(self):
-        try: self.ws.close()
-        except: pass
+        try:
+            self.ws.close()
+        except:
+            pass
+
 
 # --- STATES ---
 class State(Enum):
-    UNKNOWN = 0       # 初始状态或未定义页面
-    LOGIN = 1         # 登录界面 (#/login)
+    UNKNOWN = 0  # 初始状态或未定义页面
+    LOGIN = 1  # 登录界面 (#/login)
     DESKTOP_LIST = 2  # 云电脑列表主界面 (#/home)
-    CONNECTING = 3    # 正在建立桌面连接（加载中）
-    IN_SESSION = 4    # 已成功进入桌面会话
-    ZOMBIE = 5        # 客户端卡死或无响应状态
-    WAIT = 6          # 冲突等待
-    UPDATING = 7      # 发现新版本弹窗状态
-    GUIDE = 8         # 新手引导页状态
+    CONNECTING = 3  # 正在建立桌面连接（加载中）
+    IN_SESSION = 4  # 已成功进入桌面会话
+    ZOMBIE = 5  # 客户端卡死或无响应状态
+    WAIT = 6  # 冲突等待
+    UPDATING = 7  # 发现新版本弹窗状态
+    GUIDE = 8  # 新手引导页状态
+
 
 # --- MAIN CONTROLLER ---
 class VDIStateMachine:
@@ -118,9 +138,13 @@ class VDIStateMachine:
         self.state = State.UNKNOWN
         self.last_state = None
         self.state_start_time = time.time()
-        self.last_action_time = 0    # 追踪最后一次尝试操作的时间
-        self.last_connecting_log = 0 # 追踪 CONNECTING 状态的最后一次日志时间
-        self.last_healthy_time = time.time() # 新增：看门狗，记录最后一次正常业务状态的时间
+        self.last_action_time = 0  # 追踪最后一次尝试操作的时间
+        self.last_connecting_log = 0  # 追踪 CONNECTING 状态的最后一次日志时间
+
+        # 20 小时模式：进入桌面后 1 分钟关闭会话，等待 10 分钟后重连，循环
+        self._cycle_phase = "IDLE"  # IDLE | COUNTDOWN_TO_CLOSE | WAIT_RECONNECT
+        self._cycle_deadline_ts = 0
+        self._cycle_last_log_ts = 0
 
     def reload_config(self):
         self.config = load_config()
@@ -134,6 +158,8 @@ class VDIStateMachine:
         self.conflict_wait = int(self.config.get('conflict_wait_seconds', 300))
         self.keepalive_interval = random.randint(self.min_int, self.max_int)
         self.last_conflict_log = 0
+        self.is_20hour = _parse_bool(self.config.get('is_20hour', False), default=False)
+        self.sleep_20hour = int(self.config.get('sleep_20hour', 720))
 
     def get_cdp_session(self):
         """Get or refresh CDP session"""
@@ -180,11 +206,10 @@ class VDIStateMachine:
         """Find element coordinates and perform a physical click via CDP"""
         s = self.get_cdp_session()
         if not s: return False
-        
 
         target_selector = py_json.dumps(selector)
         target_hint = py_json.dumps(text_hint) if text_hint else "null"
-        
+
         # JS to find element and get its center coordinates with visibility check
         js_find = f"""
             (function() {{
@@ -203,12 +228,14 @@ class VDIStateMachine:
                 }} catch(e) {{ return null; }}
             }})()
         """
-        
+
         pos = s.evaluate(js_find)
         if pos and 'x' in pos and 'y' in pos:
             x, y = pos['x'], pos['y']
-            s.send("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1})
-            s.send("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1})
+            s.send("Input.dispatchMouseEvent",
+                   {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1})
+            s.send("Input.dispatchMouseEvent",
+                   {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1})
             return True
         return False
 
@@ -226,8 +253,10 @@ class VDIStateMachine:
         pos = s.evaluate(js_find)
         if pos and 'x' in pos and 'y' in pos:
             x, y = pos['x'], pos['y']
-            s.send("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1})
-            s.send("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1})
+            s.send("Input.dispatchMouseEvent",
+                   {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1})
+            s.send("Input.dispatchMouseEvent",
+                   {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1})
             return True
         return False
 
@@ -300,18 +329,18 @@ class VDIStateMachine:
         if not url:
             logger.warning("[UPDATE] Could not find upgrade URL in DOM.")
             return False
-            
+
         target_deb = "/tmp/vdi_update_manual.deb"
         logger.info(f"[UPDATE] Found URL: {url}. Starting manual download...")
-        
+
         try:
             # A. 增强版下载：包含断点续传和自动重试
             curl_cmd = [
                 "curl", "-L",
-                "--retry", "5",               # 自动重试 5 次
-                "--retry-delay", "5",         # 重试间隔 5 秒
-                "--connect-timeout", "30",    # 连接超时
-                "-C", "-",                    # 断点续传 (如果下载中断，下次从断点开始)
+                "--retry", "5",  # 自动重试 5 次
+                "--retry-delay", "5",  # 重试间隔 5 秒
+                "--connect-timeout", "30",  # 连接超时
+                "-C", "-",  # 断点续传 (如果下载中断，下次从断点开始)
                 url,
                 "-o", target_deb
             ]
@@ -327,7 +356,7 @@ class VDIStateMachine:
                 logger.error("[UPDATE] DEB file is corrupted. Deleting it to prevent resume errors.")
                 if os.path.exists(target_deb): os.remove(target_deb)
                 return False
-            
+
             # C. 使用 dpkg 安装
             logger.info("[UPDATE] Installing via dpkg (ignoring initial dependency errors)...")
             # 这里设为 check=False，因为如果有缺依赖 dpkg 会返回错误码，我们需要后续用 apt 修复它
@@ -336,14 +365,14 @@ class VDIStateMachine:
             # D. 自动修复依赖 (非常关键)
             logger.info("[UPDATE] Fixing broken dependencies via apt-get...")
             try:
-                subprocess.run(["apt-get", "update"], check=False) # 尝试更新源索引
+                subprocess.run(["apt-get", "update"], check=False)  # 尝试更新源索引
                 subprocess.run(["apt-get", "install", "-f", "-y"], check=True)
                 logger.info("[UPDATE] Dependency fixation successful.")
             except Exception as e:
                 logger.warning(f"[UPDATE] Dependency fix had issues (non-fatal if package works): {e}")
 
             logger.info("[UPDATE] Installation process complete. Restarting services...")
-            
+
             # E. 重启所有容器内服务，确保新版本生效并清除残留进程
             subprocess.run(["supervisorctl", "restart", "all"], check=True)
             return True
@@ -359,8 +388,8 @@ class VDIStateMachine:
             # Select All (Ctrl+A) to ensure we overwrite existing content
             s.send("Input.dispatchKeyEvent", {
                 "type": "keyDown",
-                "modifiers": 2, # Control
-                "windowsVirtualKeyCode": 65, # A
+                "modifiers": 2,  # Control
+                "windowsVirtualKeyCode": 65,  # A
                 "key": "a",
                 "code": "KeyA"
             })
@@ -388,7 +417,7 @@ class VDIStateMachine:
         dialog_text = s.evaluate(js_get_dialog)
         if not dialog_text:
             return None
-            
+
         # 该云电脑已在其他设备上登录(A90020124)
         keywords = ["其他设备上登录", "已分配", "已回收"]
         if any(kw in dialog_text for kw in keywords):
@@ -400,7 +429,7 @@ class VDIStateMachine:
         """判定是否在列表页 (#/home) 以及连接中状态"""
         if "home" not in url:
             return None
-            
+
         # 检查主按钮状态判定是否在连接中
         is_disabled = s.evaluate("document.querySelector('.btn-link') && document.querySelector('.btn-link').disabled")
         if is_disabled:
@@ -411,7 +440,7 @@ class VDIStateMachine:
         """判定是否在登录页 (#/login)"""
         if "login" not in url:
             return None
-            
+
         # 识别具体登录子视图供日志参考
         login_view = s.evaluate("""
             (function() {
@@ -482,7 +511,7 @@ class VDIStateMachine:
 
         except Exception as e:
             logger.error(f"[SENSE] Error during detection: {e}")
-            
+
         return State.UNKNOWN
 
     def check_guide_state(self):
@@ -502,9 +531,10 @@ class VDIStateMachine:
         now = time.time()
         # 每 60 秒打印一次倒计时信息
         if int(duration) > 0 and (now - self.last_conflict_log >= 60):
-            logger.warning(f"[ACT] CONFLICT WAIT: Giving user time... ({duration//60:.0f}/{self.conflict_wait//60:.0f} mins)")
+            logger.warning(
+                f"[ACT] CONFLICT WAIT: Giving user time... ({duration // 60:.0f}/{self.conflict_wait // 60:.0f} mins)")
             self.last_conflict_log = now
-        
+
         # 超过配置的冲突等待时间后，刷新页面尝试恢复
         if duration > self.conflict_wait:
             logger.info("[ACT] WAIT OVER -> Refreshing to check status")
@@ -514,14 +544,16 @@ class VDIStateMachine:
 
     def _ensure_correct_login_view(self, s):
         """子步骤：确保在正确的登录视图 (子账号 vs 账密)"""
-        view_text = s.evaluate("document.querySelector('.lf-name h6') ? document.querySelector('.lf-name h6').innerText : ''")
-        target_text = "子账号登录" if self.login_method == "sub_account" else "账号名密码登录"
-        
-        if target_text not in view_text:
-            logger.info(f"[ACT] Switching to {target_text} view...")
-            switch_btn_text = "子账号登录" if self.login_method == "sub_account" else "账密登录"
-            if self.click_at_selector(".lf-sub p", text_hint=switch_btn_text):
-                time.sleep(3) # 等待视图切换动画
+        if self.login_method != "other":  # 未选择其他方式（短信/扫码）
+            view_text = s.evaluate(
+                "document.querySelector('.lf-name h6') ? document.querySelector('.lf-name h6').innerText : ''")
+            target_text = "子账号登录" if self.login_method == "sub_account" else "账号名密码登录"
+
+            if target_text not in view_text:
+                logger.info(f"[ACT] Switching to {target_text} view...")
+                switch_btn_text = "子账号登录" if self.login_method == "sub_account" else "账密登录"
+                if self.click_at_selector(".lf-sub p", text_hint=switch_btn_text):
+                    time.sleep(3)  # 等待视图切换动画
 
     def _perform_login_action(self, s):
         """子步骤：执行填表、勾选协议并点击登录"""
@@ -529,13 +561,13 @@ class VDIStateMachine:
         user_ok = self.paste_at_selector("input[placeholder*='账号']", self.username)
         pass_ok = self.paste_at_selector("input[type='password']", self.password)
         logger.info(f"ok1:{user_ok} , ok2: {pass_ok}")
-        
+
         if user_ok and pass_ok:
             # 2. 勾选协议
             is_checked = s.evaluate("document.querySelector('.el-checkbox').classList.contains('is-checked')")
             if not is_checked:
                 self.click_at_selector(".el-checkbox__inner")
-            
+
             # 3. 点击登录按钮
             time.sleep(1)
             self.click_at_selector("button.el-button--primary")
@@ -545,10 +577,10 @@ class VDIStateMachine:
         """处理登录页逻辑：分步调用抽离的函数"""
         now = time.time()
         if duration > 10 and (now - self.last_action_time) > 6:
-            self.reload_config() 
+            self.reload_config()
             logger.info(f"[ACT] LOGIN: Processing {self.login_method} login for {self.username}...")
             self.last_action_time = now
-            
+
             s = self.get_cdp_session()
             if not s: return
 
@@ -566,11 +598,15 @@ class VDIStateMachine:
 
     def handle_desktop_list_state(self, duration):
         """处理列表页逻辑：点击连接指定索引的桌面"""
+        # 20 小时模式：等待重连窗口期间，禁止任何“点击连接”等动作
+        if self.is_20hour and self._cycle_phase == "WAIT_RECONNECT":
+            return
+
         now = time.time()
         if duration > 5 and (now - self.last_action_time) > 10:
             logger.info(f"[ACT] LIST: Connecting to desktop index {self.connect_index}...")
             self.last_action_time = now
-            
+
             # 使用物理点击代替 JS 点击
             # 通过 nth-child 找到第 N 个可用按钮
             target_selector = f".h-item-wrap:nth-child({self.connect_index + 1}) .btn-link"
@@ -613,7 +649,7 @@ class VDIStateMachine:
             with urllib.request.urlopen(f"{self.cdp_url}/json", timeout=2) as f:
                 pages = json.load(f)
                 guide_p = next((p for p in pages if p['type'] == 'page' and "bootguidor.html" in p['url']), None)
-            
+
             if not guide_p or not guide_p.get('webSocketDebuggerUrl'):
                 return
 
@@ -622,17 +658,74 @@ class VDIStateMachine:
             try:
                 if self.click_id(tmp_s, "J_bootGuidorBtn"):
                     logger.info("[ACT] Guide page DISMISSED. Waiting for UI sync...")
-                    time.sleep(1) # 给 UI 一点消失的时间
+                    time.sleep(1)  # 给 UI 一点消失的时间
             finally:
                 tmp_s.close()
         except Exception as e:
             logger.error(f"[ACT] Guide Clearing Failed: {e}")
             pass
 
+    def _cycle_log(self, msg, every_seconds=30):
+        now = time.time()
+        if now - self._cycle_last_log_ts >= every_seconds:
+            logger.info(msg)
+            self._cycle_last_log_ts = now
+
+    def _cycle_reset(self):
+        self._cycle_phase = "IDLE"
+        self._cycle_deadline_ts = 0
+        self._cycle_last_log_ts = 0
+
+    def _cycle_reset_if_not_waiting(self):
+        """如果当前处于 WAIT_RECONNECT 等待窗口，则不允许 reset（否则会导致立刻重连）"""
+        if self.is_20hour and self._cycle_phase == "WAIT_RECONNECT":
+            return
+        self._cycle_reset()
+
+    def _cycle_schedule_close(self):
+        self._cycle_phase = "COUNTDOWN_TO_CLOSE"
+        self._cycle_deadline_ts = time.time() + 60
+        self._cycle_last_log_ts = 0
+        logger.info("[20H] Entered desktop session. Will close session in 60s.")
+
+    def _cycle_schedule_reconnect(self):
+        self._cycle_phase = "WAIT_RECONNECT"
+        self._cycle_deadline_ts = time.time() + (self.sleep_20hour * 60)
+        self._cycle_last_log_ts = 0
+        logger.info(f"[20H] Session closed. Will reconnect after {self.sleep_20hour}min.")
+
+    def _cycle_try_close_session(self):
+        """关闭会话：优先 pkill uSmartView（Viewer 进程退出即表示会话结束）"""
+        try:
+            logger.warning("[20H] Closing session: pkill -f uSmartView")
+            subprocess.call(["pkill", "-9", "-f", "uSmartView"])
+        except Exception as e:
+            logger.error(f"[20H] Close session failed: {e}")
+
     def handle_in_session_state(self):
         """处理会话运行中状态"""
-        # 执行鼠标随机移动（Jiggle）以防止超时断开
         now = time.time()
+
+        # 20 小时循环逻辑：进入会话 -> 60 秒后关闭 -> 等待 10 分钟 -> 重连
+        if self.is_20hour:
+            if self._cycle_phase == "IDLE":
+                self._cycle_schedule_close()
+
+            if self._cycle_phase == "COUNTDOWN_TO_CLOSE":
+                remaining = self._cycle_deadline_ts - now
+                if remaining <= 0:
+                    self._cycle_try_close_session()
+                    self._cycle_schedule_reconnect()
+                    return
+                else:
+                    self._cycle_log(f"[20H] In session. Closing in {remaining:.0f}s", every_seconds=15)
+                    return
+
+            # 如果处于 WAIT_RECONNECT 但仍然在 IN_SESSION，说明关闭未生效，这里继续尝试关闭
+            if self._cycle_phase == "WAIT_RECONNECT":
+                self._cycle_log("[20H] Still in session while waiting reconnect. Retrying close...", every_seconds=30)
+                self._cycle_try_close_session()
+                return
         if now - self.last_keepalive > self.keepalive_interval:
             self._do_mouse_jiggle()
             self.last_keepalive = now
@@ -650,31 +743,14 @@ class VDIStateMachine:
         logger.error("[ACT] ZOMBIE PROCESS -> KILLING")
         subprocess.call(["pkill", "-9", "-f", "uSmartView"])
 
-    def force_system_reset(self):
-        """连续多次未知状态，执行深度清理并强制退出以触发重启"""
-        logger.error("[FATAL] UNKNOWN state persisted 5 times. Force killing VDI cluster for restart.")
-        # 杀掉所有 CMCC 相关组件和可能的残留
-        # pkill -9 -f "cmcc-jtydn|QoEAgent|usbredirect|chuanyun-redirect|bootCypc|uSmartView"
-        kill_cmd = 'pkill -9 -f "cmcc-jtydn|QoEAgent|uSmartView|usbredirect|chuanyun-redirect|bootCypc"'
-        subprocess.call(kill_cmd, shell=True)
-        # 退出当前脚本，由 supervisor 负责重启
-        sys.exit(1)
-
     # --- ACT (State Handlers) ---
     def monitor_state(self, current_state):
         duration = time.time() - self.state_start_time
-        
-        # --- 优雅的看门狗逻辑 ---
-        # 只要不是在“未知”或“僵死”状态，就定义为“健康/有进展”，更新时间戳
-        if current_state not in [State.UNKNOWN, State.ZOMBIE]:
-            self.last_healthy_time = time.time()
-        
-        # 如果超过 120 秒（可调）没进入过任何健康状态，说明环境彻底卡死，触发重置
-        if time.time() - self.last_healthy_time > 120:
-            logger.error(f"[WATCHDOG] Unhealthy for {time.time() - self.last_healthy_time:.0f}s. Triggering reset.")
-            self.force_system_reset()
 
-        # --- 各状态具体处理 ---
+        # 20 小时模式：等待重连窗口期间，禁止任何“点击连接”等动作
+        if self.is_20hour and self._cycle_phase == "WAIT_RECONNECT" and current_state != State.IN_SESSION:
+            return
+
         if current_state == State.WAIT:
             self.handle_wait_state(duration)
             return
@@ -719,28 +795,50 @@ class VDIStateMachine:
             try:
                 # 1. Sense
                 new_state = self.detect_state()
-                
+
                 # 2. State Transition
                 if new_state != self.state:
                     logger.info(f"TRANSITION: {self.state.name} -> {new_state.name}")
+
+                    # 如果离开 IN_SESSION：
+                    # - 若处于 20H WAIT_RECONNECT 阶段，必须保留等待计时，禁止 reset
+                    # - 否则才清理阶段，避免跨会话残留
+                    if self.state == State.IN_SESSION and new_state != State.IN_SESSION:
+                        self._cycle_reset_if_not_waiting()
+
                     self.state = new_state
                     # 记录机器人进入当前状态的那一刻时间。
                     self.state_start_time = time.time()
                     # 记录上一次执行物理动作
                     self.last_action_time = 0
-                
+
+                # 20 小时模式：在“非会话状态”期间，负责等待 10 分钟并触发重连
+                if self.is_20hour and self._cycle_phase == "WAIT_RECONNECT" and self.state != State.IN_SESSION:
+                    now = time.time()
+                    remaining = self._cycle_deadline_ts - now
+                    if remaining <= 0:
+                        logger.info("[20H] Reconnect window reached. Forcing UI reload to trigger reconnect flow...")
+                        s = self.get_cdp_session()
+                        if s:
+                            s.reload()
+                        # 进入空闲，后续正常流程会在 DESKTOP_LIST 点击连接并进入会话
+                        self._cycle_reset()
+                    else:
+                        self._cycle_log(f"[20H] Waiting reconnect: {remaining:.0f}s remaining", every_seconds=30)
+
                 # 3. Act
                 self.monitor_state(new_state)
-                
+
                 # 4. Tick
                 time.sleep(2)
-                    
+
             except KeyboardInterrupt:
                 break
             except Exception as e:
                 logger.error(f"Loop Crash: {e}")
                 time.sleep(5)
                 self.session = None
+
 
 if __name__ == "__main__":
     time.sleep(5)
