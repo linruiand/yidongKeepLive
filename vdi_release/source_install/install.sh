@@ -86,10 +86,6 @@ docker run -d \
     -v /dev/dri:/dev/dri \
     -v /run/dbus:/run/dbus:ro \
     \
-    -v /sys/class/dmi:/sys/class/dmi:ro \
-    -v /sys/firmware:/sys/firmware:ro \
-    -v /sys/devices/virtual/dmi:/sys/devices/virtual/dmi:ro \
-    \
     -v /proc/cpuinfo:/proc/cpuinfo:ro \
     \
     -e LANG=zh_CN.UTF-8 \
