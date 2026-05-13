@@ -138,6 +138,8 @@ class State(Enum):
 
 class VDIStateMachine:
     SERIAL_SWITCH_WAIT_SECONDS = 10
+    STALE_DEB_MAX_AGE_SECONDS = 12 * 60 * 60
+    WATCHDOG_UNHEALTHY_SECONDS = 120
 
     def __init__(self):
         self.reload_config()
@@ -331,7 +333,7 @@ class VDIStateMachine:
                     if birth_time <= 0 or birth_time > now:
                         logger.info("[UPDATE] Invalid start-time marker. Resetting stale download state.")
                         os.remove(target_deb)
-                    elif (now - birth_time) > 43200:
+                    elif (now - birth_time) > self.STALE_DEB_MAX_AGE_SECONDS:
                         logger.info("[UPDATE] Stale deb (>12h). Cleaning up.")
                         os.remove(target_deb)
                     else:
@@ -1017,7 +1019,7 @@ class VDIStateMachine:
         if current_state not in [State.UNKNOWN, State.ZOMBIE]:
             self.last_healthy_time = time.time()
 
-        if time.time() - self.last_healthy_time > 120:
+        if time.time() - self.last_healthy_time > self.WATCHDOG_UNHEALTHY_SECONDS:
             logger.error(f"[WATCHDOG] Unhealthy for {time.time() - self.last_healthy_time:.0f}s. Triggering reset.")
             self.force_system_reset()
 
