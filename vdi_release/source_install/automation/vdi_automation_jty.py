@@ -530,8 +530,8 @@ class VDIStateMachine:
                 }
                 function isDisabled(el){
                     if(!el) return true;
-                    if(el.tagName === 'BUTTON' && !!el.disabled) return true;
-                    const aria = (el.getAttribute('aria-disabled') || '').toLowerCase();
+                    if(el.tagName === 'BUTTON' && el.disabled) return true;
+                    const aria = (el.getAttribute('aria-disabled') || '').toString().toLowerCase();
                     if(aria === 'true') return true;
                     const cls = (el.className || '').toString().toLowerCase();
                     if(cls.includes('is-disabled') || cls.includes('disabled')) return true;
