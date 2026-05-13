@@ -335,16 +335,19 @@ class VDIStateMachine:
                     with open(start_time_file, "r") as f:
                         content = f.read().strip()
                     birth_time = float(content) if content else 0
-                    if birth_time <= 0 or birth_time > now:
-                        logger.info("[UPDATE] Invalid start-time marker. Resetting stale download state.")
+                    if birth_time <= 0:
+                        logger.info("[UPDATE] Invalid start-time marker (<=0). Resetting stale download state.")
+                        os.remove(target_deb)
+                    elif birth_time > now:
+                        logger.info("[UPDATE] Future start-time marker detected. Resetting stale download state.")
                         os.remove(target_deb)
                     elif (now - birth_time) > self.STALE_DEB_MAX_AGE_SECONDS:
                         logger.info("[UPDATE] Stale deb (>12h). Cleaning up.")
                         os.remove(target_deb)
                     else:
                         file_exists_and_valid = True
-                except Exception:
-                    logger.info("[UPDATE] Invalid start-time shadow file. Resetting download state.")
+                except Exception as e:
+                    logger.info(f"[UPDATE] Invalid start-time shadow file ({e}). Resetting download state.")
                     if os.path.exists(target_deb):
                         os.remove(target_deb)
             else:
@@ -582,8 +585,8 @@ class VDIStateMachine:
                         if tmp_s.evaluate(js):
                             logger.info(f"[SENSE] Privacy Dialog detected on page: {p.get('title')}")
                             return State.PRIVACY
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"[SENSE] Privacy probe failed on page {p.get('title')}: {e}")
                     finally:
                         tmp_s.close()
         except Exception as e:
@@ -1027,8 +1030,10 @@ class VDIStateMachine:
         if current_state not in [State.UNKNOWN, State.ZOMBIE]:
             self.last_healthy_time = time.time()
 
-        if time.time() - self.last_healthy_time > self.WATCHDOG_UNHEALTHY_SECONDS:
-            logger.error(f"[WATCHDOG] Unhealthy for {time.time() - self.last_healthy_time:.0f}s. Triggering reset.")
+        now = time.time()
+        unhealthy_for = now - self.last_healthy_time
+        if unhealthy_for > self.WATCHDOG_UNHEALTHY_SECONDS:
+            logger.error(f"[WATCHDOG] Unhealthy for {unhealthy_for:.0f}s. Triggering reset.")
             self.force_system_reset()
 
         if current_state == State.WAIT:
