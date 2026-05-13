@@ -346,11 +346,14 @@ class VDIStateMachine:
                 logger.info("[UPDATE] Deb exists without start marker. Resetting download state.")
                 os.remove(target_deb)
 
-        try:
-            with open(start_time_file, "r") as f:
-                start_marker = f.read().strip()
-        except Exception:
-            start_marker = ""
+        if file_exists_and_valid:
+            try:
+                with open(start_time_file, "r") as f:
+                    start_marker = f.read().strip()
+            except Exception:
+                start_marker = ""
+        else:
+            start_marker = "0"
 
         if (not file_exists_and_valid) or start_marker in ["0", ""]:
             with open(start_time_file, "w") as f:
@@ -1001,8 +1004,7 @@ class VDIStateMachine:
 
     def force_system_reset(self):
         logger.error("[FATAL] Unhealthy watchdog threshold reached. Force killing VDI cluster for restart.")
-        kill_cmd = 'pkill -9 -f "cmcc-jtydn|QoEAgent|uSmartView|usbredirect|chuanyun-redirect|bootCypc"'
-        subprocess.call(kill_cmd, shell=True)
+        subprocess.call(["pkill", "-9", "-f", "cmcc-jtydn|QoEAgent|uSmartView|usbredirect|chuanyun-redirect|bootCypc"])
         sys.exit(1)
 
     # --- Monitor / loop ---
