@@ -133,6 +133,7 @@ class State(Enum):
     WAIT = 6  # 冲突等待
     UPDATING = 7  # 发现新版本弹窗状态
     GUIDE = 8  # 新手引导页状态
+    PRIVACY = 9  # 隐私协议弹窗状态
 
 
 class VDIStateMachine:
@@ -143,12 +144,14 @@ class VDIStateMachine:
         self.cdp_url = "http://localhost:9222"
         self.session = None
         self.last_keepalive = time.time()
+        self.success_file = '/config/automation_success.txt'
         self.state = State.UNKNOWN
         self.last_state = None
         self.state_start_time = time.time()
         self.last_action_time = 0
         self.last_connecting_log = 0
         self.last_conflict_log = 0
+        self.last_healthy_time = time.time()
 
         # 20H cycle
         self._cycle_phase = "IDLE"  # IDLE | COUNTDOWN_TO_CLOSE | WAIT_RECONNECT
@@ -315,6 +318,45 @@ class VDIStateMachine:
             return False
 
         target_deb = "/tmp/vdi_update_manual.deb"
+        start_time_file = "/tmp/.vdi_update_manual.start"
+        now = time.time()
+
+        file_exists_and_valid = False
+        if os.path.exists(target_deb):
+            if os.path.exists(start_time_file):
+                try:
+                    with open(start_time_file, "r") as f:
+                        content = f.read().strip()
+                    birth_time = float(content) if content else 0
+                    if birth_time <= 0 or birth_time > now:
+                        logger.info("[UPDATE] Invalid start-time marker. Resetting stale download state.")
+                        os.remove(target_deb)
+                    elif (now - birth_time) > 43200:
+                        logger.info("[UPDATE] Stale deb (>12h). Cleaning up.")
+                        os.remove(target_deb)
+                    else:
+                        file_exists_and_valid = True
+                except Exception:
+                    logger.info("[UPDATE] Invalid start-time shadow file. Resetting download state.")
+                    if os.path.exists(target_deb):
+                        os.remove(target_deb)
+            else:
+                logger.info("[UPDATE] Deb exists without start marker. Resetting download state.")
+                os.remove(target_deb)
+
+        if not file_exists_and_valid:
+            with open(start_time_file, "w") as f:
+                f.write("0")
+
+        try:
+            with open(start_time_file, "r") as f:
+                if f.read().strip() in ["0", ""]:
+                    with open(start_time_file, "w") as f2:
+                        f2.write(str(now))
+        except Exception:
+            with open(start_time_file, "w") as f:
+                f.write(str(now))
+
         logger.info(f"[UPDATE] Found URL: {url}. Starting manual download...")
         try:
             curl_cmd = ["curl", "-L", "--retry", "5", "--retry-delay", "5", "--connect-timeout", "30", "-C", "-", url,
@@ -472,7 +514,7 @@ class VDIStateMachine:
         return State.DESKTOP_LIST
 
     def check_login_page_state(self, s, url):
-        if "login" not in (url or ""):
+        if "login" not in (url or "") and "start.html" not in (url or ""):
             return None
         login_view = s.evaluate("""
             (function() {
@@ -500,6 +542,34 @@ class VDIStateMachine:
             return State.UPDATING
         return None
 
+    def check_privacy_state(self):
+        try:
+            with urllib.request.urlopen(f"{self.cdp_url}/json", timeout=2) as f:
+                pages = json.load(f)
+                for p in pages:
+                    if p.get('type') != 'page':
+                        continue
+                    ws_url = p.get('webSocketDebuggerUrl')
+                    if not ws_url:
+                        continue
+                    tmp_s = CDPSession(ws_url)
+                    try:
+                        js = """(function(){
+                            let btn = document.querySelector('.dialog-btn-sure') ||
+                                      Array.from(document.querySelectorAll('div, button')).find(e => (e.innerText || '').trim().includes('已满14周岁并同意'));
+                            return !!btn;
+                        })()"""
+                        if tmp_s.evaluate(js):
+                            logger.info(f"[SENSE] Privacy Dialog detected on page: {p.get('title')}")
+                            return State.PRIVACY
+                    except Exception:
+                        pass
+                    finally:
+                        tmp_s.close()
+        except Exception as e:
+            logger.error(f"Check Privacy Exception: {e}")
+        return None
+
     def check_guide_state(self):
         try:
             with urllib.request.urlopen(f"{self.cdp_url}/json", timeout=1) as f:
@@ -511,6 +581,10 @@ class VDIStateMachine:
         return None
 
     def detect_state(self):
+        res = self.check_privacy_state()
+        if res:
+            return res
+
         res = self.check_guide_state()
         if res:
             return res
@@ -609,6 +683,46 @@ class VDIStateMachine:
             self.last_action_time = now
             logger.info("[ACT] UPDATING: Update dialog found. Triggering manual update flow...")
             self.perform_manual_update()
+
+    def handle_privacy_state(self):
+        now = time.time()
+        if (now - self.last_action_time) < 5:
+            return
+        self.last_action_time = now
+        logger.info("[ACT] PRIVACY: Found privacy dialog. Executing independent handler...")
+
+        try:
+            with urllib.request.urlopen(f"{self.cdp_url}/json", timeout=2) as f:
+                pages = json.load(f)
+                for p in pages:
+                    if p.get('type') != 'page':
+                        continue
+                    ws_url = p.get('webSocketDebuggerUrl')
+                    if not ws_url:
+                        continue
+                    tmp_s = CDPSession(ws_url)
+                    try:
+                        js_trigger = """(function(){
+                            try {
+                                let btn = document.querySelector('.dialog-btn-sure') ||
+                                          Array.from(document.querySelectorAll('div, button')).find(e => (e.innerText || '').trim().includes('已满14周岁并同意'));
+                                if (!btn) return null;
+                                let rect = btn.getBoundingClientRect();
+                                btn.click();
+                                return {x: rect.left + rect.width/2, y: rect.top + rect.height/2, text: (btn.innerText || '').trim()};
+                            } catch(e) { return null; }
+                        })()"""
+                        pos = tmp_s.evaluate(js_trigger)
+                        if pos and isinstance(pos, dict):
+                            logger.info(f"[ACT] Found Privacy Button '{pos.get('text')}', clicking at {pos['x']},{pos['y']}")
+                            tmp_s.send("Input.dispatchMouseEvent", {"type": "mousePressed", "x": pos['x'], "y": pos['y'], "button": "left", "clickCount": 1})
+                            tmp_s.send("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": pos['x'], "y": pos['y'], "button": "left", "clickCount": 1})
+                            time.sleep(1)
+                            return
+                    finally:
+                        tmp_s.close()
+        except Exception as e:
+            logger.error(f"Independent privacy handler failed: {e}")
 
     # --- Dynamic desktop click helpers ---
     def _count_connect_buttons_left(self, s):
@@ -836,8 +950,17 @@ class VDIStateMachine:
                 rx, ry = random.randint(200, 600), random.randint(200, 600)
                 s.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": rx, "y": ry})
                 logger.info(f"[ACT] IN_SESSION: Mouse Jiggle to ({rx}, {ry}) to keep alive.")
+                self.write_success_marker()
         except Exception as e:
             logger.error(f"Heartbeat Jiggle Failed: {e}")
+
+    def write_success_marker(self):
+        try:
+            with open(self.success_file, 'w') as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S"))
+            logger.info(f"[SUCCESS] Wrote success marker to {self.success_file}")
+        except Exception as e:
+            logger.error(f"Failed to write success marker: {e}")
 
     def handle_in_session_state(self):
         now = time.time()
@@ -877,12 +1000,26 @@ class VDIStateMachine:
         logger.error("[ACT] ZOMBIE PROCESS -> KILLING")
         subprocess.call(["pkill", "-9", "-f", "uSmartView"])
 
+    def force_system_reset(self):
+        logger.error("[FATAL] Unhealthy watchdog threshold reached. Force killing VDI cluster for restart.")
+        kill_cmd = 'pkill -9 -f "cmcc-jtydn|QoEAgent|uSmartView|usbredirect|chuanyun-redirect|bootCypc"'
+        subprocess.call(kill_cmd, shell=True)
+        sys.exit(1)
+
     # --- Monitor / loop ---
     def monitor_state(self, current_state):
         duration = time.time() - self.state_start_time
 
         if self.is_20hour and self._cycle_phase == "WAIT_RECONNECT" and current_state != State.IN_SESSION:
+            self.last_healthy_time = time.time()
             return
+
+        if current_state not in [State.UNKNOWN, State.ZOMBIE]:
+            self.last_healthy_time = time.time()
+
+        if time.time() - self.last_healthy_time > 120:
+            logger.error(f"[WATCHDOG] Unhealthy for {time.time() - self.last_healthy_time:.0f}s. Triggering reset.")
+            self.force_system_reset()
 
         if current_state == State.WAIT:
             return self.handle_wait_state(duration)
@@ -902,6 +1039,8 @@ class VDIStateMachine:
             return self.handle_zombie_state()
         if current_state == State.GUIDE:
             return self.handle_guide_state()
+        if current_state == State.PRIVACY:
+            return self.handle_privacy_state()
 
     def run(self):
         logger.info(">>> VDI FSM Bot Started (Router-Aware)")
@@ -913,6 +1052,8 @@ class VDIStateMachine:
                     logger.info(f"TRANSITION: {self.state.name} -> {new_state.name}")
                     if self.state == State.IN_SESSION and new_state != State.IN_SESSION:
                         self._cycle_reset_if_not_waiting()
+                    if new_state == State.IN_SESSION:
+                        self.write_success_marker()
                     self.state = new_state
                     self.state_start_time = time.time()
                     self.last_action_time = 0
