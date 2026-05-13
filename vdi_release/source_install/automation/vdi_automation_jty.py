@@ -346,16 +346,13 @@ class VDIStateMachine:
                 logger.info("[UPDATE] Deb exists without start marker. Resetting download state.")
                 os.remove(target_deb)
 
-        if not file_exists_and_valid:
-            with open(start_time_file, "w") as f:
-                f.write("0")
-
         try:
             with open(start_time_file, "r") as f:
-                if f.read().strip() in ["0", ""]:
-                    with open(start_time_file, "w") as f2:
-                        f2.write(str(now))
+                start_marker = f.read().strip()
         except Exception:
+            start_marker = ""
+
+        if (not file_exists_and_valid) or start_marker in ["0", ""]:
             with open(start_time_file, "w") as f:
                 f.write(str(now))
 
@@ -558,7 +555,7 @@ class VDIStateMachine:
                     try:
                         js = """(function(){
                             let btn = document.querySelector('.dialog-btn-sure') ||
-                                      Array.from(document.querySelectorAll('div, button')).find(e => (e.innerText || '').trim().includes('已满14周岁并同意'));
+                                      Array.from(document.querySelectorAll('button, .dialog-btn-sure, [class*=dialog-btn], [role=\"button\"]')).find(e => (e.innerText || '').trim().includes('已满14周岁并同意'));
                             return !!btn;
                         })()"""
                         if tmp_s.evaluate(js):
@@ -707,7 +704,7 @@ class VDIStateMachine:
                         js_trigger = """(function(){
                             try {
                                 let btn = document.querySelector('.dialog-btn-sure') ||
-                                          Array.from(document.querySelectorAll('div, button')).find(e => (e.innerText || '').trim().includes('已满14周岁并同意'));
+                                          Array.from(document.querySelectorAll('button, .dialog-btn-sure, [class*=dialog-btn], [role=\"button\"]')).find(e => (e.innerText || '').trim().includes('已满14周岁并同意'));
                                 if (!btn) return null;
                                 let rect = btn.getBoundingClientRect();
                                 btn.click();
