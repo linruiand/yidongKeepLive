@@ -140,6 +140,7 @@ class VDIStateMachine:
     SERIAL_SWITCH_WAIT_SECONDS = 10
     STALE_DEB_MAX_AGE_SECONDS = 12 * 60 * 60
     WATCHDOG_UNHEALTHY_SECONDS = 120
+    CLOSE_CONFIRM_DIALOG_TEXT = '是否确定关闭云电脑'
     PRIVACY_BUTTON_EXPR = (
         "document.querySelector('.dialog-btn-sure') || "
         "Array.from(document.querySelectorAll('button, .dialog-btn-sure, [class*=dialog-btn], [role=\"button\"]'))"
@@ -863,6 +864,51 @@ class VDIStateMachine:
         logger.info(f"[ACT] Clicked desktop-area '连接' button #{n} at ({x:.0f}, {y:.0f}).")
         return True
 
+    def _accept_close_confirm_dialog(self, s):
+        """Detect and accept the cloud-computer close-confirmation dialog that appears
+        during serial desktop rotation when the platform asks to close the current
+        cloud computer before connecting to the next one."""
+        js = """
+            (function() {
+                var CONFIRM_TEXT = '%s';
+                var BTN_TEXT     = '确定';
+                function isVisible(el) {
+                    if (!el) return false;
+                    var r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) return false;
+                    var st = window.getComputedStyle(el);
+                    if (!st || st.display === 'none' || st.visibility === 'hidden'
+                            || parseFloat(st.opacity) === 0) return false;
+                    return true;
+                }
+                var dialogs = Array.from(document.querySelectorAll(
+                    '.el-dialog, .el-message-box, .el-message-box__wrapper, ' +
+                    '[class*="dialog"], [class*="modal"]'
+                )).filter(isVisible);
+                for (var i = 0; i < dialogs.length; i++) {
+                    var d = dialogs[i];
+                    if ((d.innerText || '').indexOf(CONFIRM_TEXT) === -1) continue;
+                    var btn = Array.from(d.querySelectorAll('button'))
+                        .find(function(b) {
+                            return (b.innerText || '').trim() === BTN_TEXT && isVisible(b);
+                        });
+                    if (btn) {
+                        btn.click();
+                        return {clicked: true};
+                    }
+                }
+                return {clicked: false};
+            })()
+        """ % self.CLOSE_CONFIRM_DIALOG_TEXT
+        try:
+            res = s.evaluate(js)
+            if res and res.get("clicked"):
+                logger.info("[ACT] Cloud computer close confirmation dialog accepted (clicked '确定').")
+                return True
+        except Exception as e:
+            logger.error(f"[ACT] Cloud computer close confirmation dialog check error: {e}")
+        return False
+
     # --- DESKTOP LIST ---
     def handle_desktop_list_state(self, duration):
         if self.is_20hour and self._cycle_phase == "WAIT_RECONNECT":
@@ -878,7 +924,13 @@ class VDIStateMachine:
             if not s:
                 return
 
-            # First: dismiss popup if any (SAFE)
+            # First: handle cloud-computer close-confirmation dialog (serial rotation)
+            if self._accept_close_confirm_dialog(s):
+                self.last_action_time = now
+                time.sleep(1.2)
+                return
+
+            # Then: dismiss other popups if any (SAFE)
             if self._dismiss_home_popup_if_any(s):
                 self.last_action_time = now
                 time.sleep(1.2)
