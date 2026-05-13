@@ -518,8 +518,38 @@ class VDIStateMachine:
     def check_desktop_list_state(self, s, url):
         if "home" not in (url or ""):
             return None
-        is_disabled = s.evaluate("document.querySelector('.btn-link') && document.querySelector('.btn-link').disabled")
-        if is_disabled:
+        btn_stat = s.evaluate(r"""
+            (function(){
+                function isVisible(el){
+                    if(!el) return false;
+                    const r = el.getBoundingClientRect();
+                    if(r.width<=0||r.height<=0) return false;
+                    const st = window.getComputedStyle(el);
+                    if(!st || st.display==='none' || st.visibility==='hidden' || st.opacity==='0') return false;
+                    return true;
+                }
+                function isDisabled(el){
+                    if(!el) return true;
+                    if(el.tagName === 'BUTTON' && !!el.disabled) return true;
+                    const aria = (el.getAttribute('aria-disabled') || '').toLowerCase();
+                    if(aria === 'true') return true;
+                    const cls = (el.className || '').toString().toLowerCase();
+                    if(cls.includes('is-disabled') || cls.includes('disabled')) return true;
+                    return false;
+                }
+                const vw = window.innerWidth || 0;
+                const btns = Array.from(document.querySelectorAll('button.btn-link, .btn-link'))
+                  .filter(el => ((el.innerText||'').trim() === '连接'))
+                  .filter(isVisible)
+                  .filter(el => el.getBoundingClientRect().x < vw * 0.6);
+                if(btns.length === 0) return {count: 0, enabled: 0};
+                const enabled = btns.filter(el => !isDisabled(el)).length;
+                return {count: btns.length, enabled: enabled};
+            })()
+        """)
+        if not btn_stat or int(btn_stat.get("count", 0)) <= 0:
+            return None
+        if int(btn_stat.get("enabled", 0)) <= 0:
             return State.CONNECTING
         return State.DESKTOP_LIST
 
