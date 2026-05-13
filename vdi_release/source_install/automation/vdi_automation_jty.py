@@ -549,6 +549,23 @@ class VDIStateMachine:
             return State.UPDATING
         return None
 
+    def _privacy_probe_js(self):
+        return """(function(){
+            let btn = %s;
+            return !!btn;
+        })()""" % self.PRIVACY_BUTTON_EXPR
+
+    def _privacy_click_js(self):
+        return """(function(){
+            try {
+                let btn = %s;
+                if (!btn) return null;
+                let rect = btn.getBoundingClientRect();
+                btn.click();
+                return {x: rect.left + rect.width/2, y: rect.top + rect.height/2, text: (btn.innerText || '').trim()};
+            } catch(e) { return null; }
+        })()""" % self.PRIVACY_BUTTON_EXPR
+
     def check_privacy_state(self):
         try:
             with urllib.request.urlopen(f"{self.cdp_url}/json", timeout=2) as f:
@@ -561,10 +578,7 @@ class VDIStateMachine:
                         continue
                     tmp_s = CDPSession(ws_url)
                     try:
-                        js = """(function(){
-                            let btn = {self.PRIVACY_BUTTON_EXPR};
-                            return !!btn;
-                        })()""".replace("{self.PRIVACY_BUTTON_EXPR}", self.PRIVACY_BUTTON_EXPR)
+                        js = self._privacy_probe_js()
                         if tmp_s.evaluate(js):
                             logger.info(f"[SENSE] Privacy Dialog detected on page: {p.get('title')}")
                             return State.PRIVACY
@@ -708,15 +722,7 @@ class VDIStateMachine:
                         continue
                     tmp_s = CDPSession(ws_url)
                     try:
-                        js_trigger = """(function(){
-                            try {
-                                let btn = {self.PRIVACY_BUTTON_EXPR};
-                                if (!btn) return null;
-                                let rect = btn.getBoundingClientRect();
-                                btn.click();
-                                return {x: rect.left + rect.width/2, y: rect.top + rect.height/2, text: (btn.innerText || '').trim()};
-                            } catch(e) { return null; }
-                        })()""".replace("{self.PRIVACY_BUTTON_EXPR}", self.PRIVACY_BUTTON_EXPR)
+                        js_trigger = self._privacy_click_js()
                         pos = tmp_s.evaluate(js_trigger)
                         if pos and isinstance(pos, dict):
                             logger.info(f"[ACT] Found Privacy Button '{pos.get('text')}', clicking at {pos['x']},{pos['y']}")
