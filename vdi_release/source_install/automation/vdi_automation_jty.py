@@ -140,6 +140,11 @@ class VDIStateMachine:
     SERIAL_SWITCH_WAIT_SECONDS = 10
     STALE_DEB_MAX_AGE_SECONDS = 12 * 60 * 60
     WATCHDOG_UNHEALTHY_SECONDS = 120
+    PRIVACY_BUTTON_EXPR = (
+        "document.querySelector('.dialog-btn-sure') || "
+        "Array.from(document.querySelectorAll('button, .dialog-btn-sure, [class*=dialog-btn], [role=\"button\"]'))"
+        ".find(e => (e.innerText || '').trim().includes('已满14周岁并同意'))"
+    )
 
     def __init__(self):
         self.reload_config()
@@ -557,10 +562,9 @@ class VDIStateMachine:
                     tmp_s = CDPSession(ws_url)
                     try:
                         js = """(function(){
-                            let btn = document.querySelector('.dialog-btn-sure') ||
-                                      Array.from(document.querySelectorAll('button, .dialog-btn-sure, [class*=dialog-btn], [role=\"button\"]')).find(e => (e.innerText || '').trim().includes('已满14周岁并同意'));
+                            let btn = {self.PRIVACY_BUTTON_EXPR};
                             return !!btn;
-                        })()"""
+                        })()""".replace("{self.PRIVACY_BUTTON_EXPR}", self.PRIVACY_BUTTON_EXPR)
                         if tmp_s.evaluate(js):
                             logger.info(f"[SENSE] Privacy Dialog detected on page: {p.get('title')}")
                             return State.PRIVACY
@@ -706,14 +710,13 @@ class VDIStateMachine:
                     try:
                         js_trigger = """(function(){
                             try {
-                                let btn = document.querySelector('.dialog-btn-sure') ||
-                                          Array.from(document.querySelectorAll('button, .dialog-btn-sure, [class*=dialog-btn], [role=\"button\"]')).find(e => (e.innerText || '').trim().includes('已满14周岁并同意'));
+                                let btn = {self.PRIVACY_BUTTON_EXPR};
                                 if (!btn) return null;
                                 let rect = btn.getBoundingClientRect();
                                 btn.click();
                                 return {x: rect.left + rect.width/2, y: rect.top + rect.height/2, text: (btn.innerText || '').trim()};
                             } catch(e) { return null; }
-                        })()"""
+                        })()""".replace("{self.PRIVACY_BUTTON_EXPR}", self.PRIVACY_BUTTON_EXPR)
                         pos = tmp_s.evaluate(js_trigger)
                         if pos and isinstance(pos, dict):
                             logger.info(f"[ACT] Found Privacy Button '{pos.get('text')}', clicking at {pos['x']},{pos['y']}")
